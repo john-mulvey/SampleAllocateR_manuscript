@@ -1,0 +1,216 @@
+---
+title: "Publication plots for sampleAllocateR manuscript"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+Much of this code is duplicated with that in the vignette, here we tweak the figures and perform simulations with a higher number of iterations to make the graphs nicer.
+
+# packages
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(SampleAllocateR)
+library(patchwork)
+```
+
+
+# simualte data
+```{r}
+toy_data = simulate_data(n_samples = 98, block_size = 2)
+```
+
+
+# generate many random layouts
+```{r, message=FALSE, results='hide'}
+random_seeds <- sample(1:1000000, 10000, replace = FALSE)
+
+results_list <- lapply(random_seeds, function(seed) {
+  allocate_samples(toy_data,
+                   batch_size = 13,
+                   covariates = c("covariate1", "covariate2", "covariate3"),
+                   method = "random",
+                   blocking_variable = NA,
+                   seed = seed)
+})
+```
+
+
+# plot probability distribution for a single convariate
+```{r, message=FALSE, results='hide'}
+# plot histrogram for a single covariate: covariate1
+probability_covariate1 <- lapply(seq_along(results_list), function(i) {
+  data.frame(
+    iteration_number = i,
+    p_value = results_list[[i]][['results']] %>%
+      filter(covariate == "covariate1") %>%
+      pull(p_value)
+  )
+})
+plot_data_covariate1 <- do.call(rbind, probability_covariate1)
+
+# plot histrogram of probability that covariate1 does not differ between the batches
+p_probability_dist = plot_data_covariate1 %>%
+  ggplot(aes(x = p_value)) +
+  geom_histogram(boundary = 0, binwidth = 0.05)
+
+p_probability_dist
+```
+
+
+# plot joint probability distribution
+```{r}
+balance_score <- lapply(seq_along(results_list), function(i) {
+  data.frame(
+    iteration_number = i,
+    balance_score = calculate_balance_score(results_list[[i]][['results']]$p_value, na.rm = TRUE)
+  )
+})
+
+plot_data_balance_score <- do.call(rbind, balance_score)
+
+# plot histrogram of joint probability
+p_balance_score_dist = plot_data_balance_score %>%
+  ggplot(aes(x = balance_score)) +
+  geom_histogram(boundary = 0, binwidth = 0.05)
+
+p_balance_score_dist
+```
+
+
+## patchwork probability distributions
+```{r}
+p_probability_dist + p_balance_score_dist +
+  plot_annotation(tag_levels = list(c("B", "C")))
+
+#ggsave("../results/plots/probability_distributions.pdf")
+```
+
+
+# compare performance
+# calcualte values
+```{r}
+runtime_random <- system.time({
+  single_layout = allocate_samples(toy_data,
+                                   batch_size = 13,
+                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   method = "random",
+                                   blocking_variable = NA)
+})
+
+runtime_brute_force <- system.time({
+  best_random_layout = allocate_samples(toy_data, 
+                                   batch_size = 13, 
+                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   iterations = 1000,
+                                   method = "best_random")
+})
+
+runtime_optimal <- system.time({
+  optimal_layout = allocate_samples(toy_data, 
+                                   batch_size = 13, 
+                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   iterations = 300,
+                                   plot_convergence = TRUE)
+})
+```
+
+
+# plot performance
+## plot joint probabilities
+```{r}
+plot_performance = data.frame(
+  method = c("brute_force", "simulated_annealing"),
+  balance_score = c(calculate_balance_score(best_random_layout[['results']]$p_value),
+                        calculate_balance_score(optimal_layout[['results']]$p_value))) %>%
+  mutate(method = factor(method, levels = c("brute_force", "simulated_annealing"))) %>%
+  ggplot(aes(x = method, y = balance_score, fill = method)) +
+  geom_col() +
+  theme(axis.text.x = element_blank(), #element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank())
+
+plot_performance
+```
+
+
+## plot computational time
+```{r}
+plot_runtime = data.frame(method = c("brute_force", "simulated_annealing"),
+           time = c(sum(runtime_brute_force), sum(runtime_optimal))) %>%
+  mutate(method = factor(method, levels = c("random", "brute_force", "simulated_annealing"))) %>%
+  ggplot(aes(x = method, y = time, fill = method)) +
+  geom_col() +
+  #scale_fill_manual(values = c("brute_force" = scales::hue_pal()(3)[2], "simulated_annealing" = scales::hue_pal()(3)[3])) +
+  theme(axis.text.x = element_blank(),#element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank())
+
+plot_runtime
+```
+
+
+## patchwork
+```{r}
+plot_performance + plot_runtime +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = list(c("D", "E"))) &
+  theme(legend.position = "bottom")
+
+#ggsave("../results/plots/performance_comparison.pdf")
+```
+
+
+# patchwork all
+```{r}
+p_probability_dist = p_probability_dist  +
+  theme(axis.text.x = element_text(size = 7))
+
+p_balance_score_dist = p_balance_score_dist +
+  theme(axis.text.x = element_text(size = 7))
+
+p_probability_dist + p_balance_score_dist + plot_performance + plot_runtime +
+  plot_layout(guides = "collect", ncol = 4) &
+  plot_annotation(tag_levels = list(c("B", "C", "D", "E"))) &
+  theme(legend.position = "bottom")
+
+ggsave("../results/plots/single_patchwork.pdf", width = 183, height = 70, units = "mm")
+```
+
+
+# plot optimsation for schematic
+```{r}
+scaleFactor <- max(optimal_layout[['optimisation_data']]$objective_value) / max(optimal_layout[['optimisation_data']]$temperature)
+
+optimisation_plot = optimal_layout[['optimisation_data']] %>%
+    mutate(Temperature = temperature * scaleFactor) %>%
+    dplyr::rename(joint_probablity = objective_value) %>%
+    gather(key = "Variable", value = "Value", joint_probablity, Temperature) %>%
+    ggplot(aes(x = iteration, y = Value, color = Variable)) +
+      geom_line() +
+      ggtitle("Optimisation data") +
+      scale_y_continuous(name = "joint_probablity",
+                         sec.axis = sec_axis(~./scaleFactor, name = "Temperature"))
+    
+optimisation_plot
+
+ggsave("../results/plots/optimisation_for_schematic.pdf", width = 7, height = 5)
+```
+
+
+
+
+
+
+
+
+
+
+
