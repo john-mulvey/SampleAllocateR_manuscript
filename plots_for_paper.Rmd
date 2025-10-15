@@ -4,22 +4,17 @@ author: "John Mulvey"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
   html_notebook:
-    toc: yes
-    toc_float: yes
-    number_sections: yes
+    toc: true
+    toc_float: true
+    number_sections: true
     theme: flatly
     highlight: tango
-  html_document:
-    toc: yes
-    df_print: paged
 ---
-
-Much of this code is duplicated with that in the vignette, here we tweak the figures and perform simulations with a higher number of iterations to make the graphs nicer.
 
 # packages
 ```{r, message = FALSE, warning = FALSE}
 library(tidyverse)
-library(SampleAllocateR)
+#library(SampleAllocateR)
 library(patchwork)
 ```
 
@@ -48,7 +43,7 @@ random_seeds <- sample(1:1000000, 10000, replace = FALSE)
 results_list <- lapply(random_seeds, function(seed) {
   allocate_samples(toy_data,
                    batch_size = 13,
-                   covariates = c("covariate1", "covariate2", "covariate3"),
+                   covariates = c("age_at_baseline", "bmi_at_baseline", "sex"),
                    method = "random",
                    blocking_variable = NA,
                    seed = seed)
@@ -57,69 +52,11 @@ results_list <- lapply(random_seeds, function(seed) {
 
 
 # plot probability distribution for a single convariate
-```{r, message=FALSE, results='hide'}
-# plot histrogram for a single covariate: covariate1
-probability_covariate1 <- lapply(seq_along(results_list), function(i) {
-  data.frame(
-    iteration_number = i,
-    p_value = results_list[[i]][['results']] %>%
-      filter(covariate == "covariate1") %>%
-      pull(p_value)
-  )
-})
-plot_data_covariate1 <- do.call(rbind, probability_covariate1)
-
-# plot histrogram of probability that covariate1 does not differ between the batches
-p_probability_dist = plot_data_covariate1 %>%
-  ggplot(aes(x = p_value)) +
-  geom_histogram(boundary = 0, binwidth = 0.05) +
-  theme_jm() +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
-  scale_x_continuous(expand = expansion(mult = c(0, 0.1)))
-
-p_probability_dist
-```
-
-
-# plot joint probability distribution
-```{r}
-balance_score <- lapply(seq_along(results_list), function(i) {
-  data.frame(
-    iteration_number = i,
-    balance_score = calculate_balance_score(results_list[[i]][['results']]$p_value, na.rm = TRUE)
-  )
-})
-
-plot_data_balance_score <- do.call(rbind, balance_score)
-
-# plot histrogram of joint probability
-p_balance_score_dist = plot_data_balance_score %>%
-  ggplot(aes(x = balance_score)) +
-  geom_histogram(boundary = 0, binwidth = 0.05)  +
-  theme_jm() +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
-  scale_x_continuous(expand = expansion(mult = c(0, 0.1)))
-
-p_balance_score_dist
-```
-
-
-## patchwork probability distributions
-```{r}
-p_probability_dist + p_balance_score_dist +
-  plot_annotation(tag_levels = list(c("B", "C")))
-
-#ggsave("../results/plots/probability_distributions.pdf")
-```
-
-
-# compare performance
-# calcualte values
 ```{r}
 runtime_random <- system.time({
   single_layout = allocate_samples(toy_data,
                                    batch_size = 13,
-                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   covariates = c("age_at_baseline", "bmi_at_baseline", "sex"),
                                    method = "random",
                                    blocking_variable = NA)
 })
@@ -127,7 +64,7 @@ runtime_random <- system.time({
 runtime_random_search <- system.time({
   best_random_layout = allocate_samples(toy_data, 
                                    batch_size = 13, 
-                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   covariates = c("age_at_baseline", "bmi_at_baseline", "sex"),
                                    iterations = 1000,
                                    method = "best_random")
 })
@@ -135,7 +72,7 @@ runtime_random_search <- system.time({
 runtime_optimal <- system.time({
   optimal_layout = allocate_samples(toy_data, 
                                    batch_size = 13, 
-                                   covariates = c("covariate1", "covariate2", "covariate3"),
+                                   covariates = c("age_at_baseline", "bmi_at_baseline", "sex"),
                                    iterations = 300,
                                    plot_convergence = TRUE)
 })
@@ -143,7 +80,7 @@ runtime_optimal <- system.time({
 
 
 # plot performance
-## plot joint probabilities
+## plot balance score
 ```{r}
 plot_performance = data.frame(
   method = c("random_search", "simulated_annealing"),
@@ -182,28 +119,423 @@ plot_runtime
 ## patchwork
 ```{r}
 plot_performance + plot_runtime +
-  plot_layout(guides = "collect") +
+  plot_layout(guides = "collect", ncol = 2) &
   plot_annotation(tag_levels = list(c("D", "E"))) &
   theme(legend.position = "bottom")
 
-#ggsave("../results/plots/performance_comparison.pdf")
+ggsave("../results/plots/patchwork_performance_evalutation.pdf", width = 113, height = 70, units = "mm")
 ```
 
 
-# patchwork all
+# sparsity of balanced layouts
 ```{r}
-p_probability_dist = p_probability_dist  +
-  theme(axis.text.x = element_text(size = 7))
+# --- Helper Function for Harmonic Mean ---
+harmonic_mean_p <- function(p_values) {
+  p_values[p_values == 0] <- .Machine$double.eps
+  1 / mean(1 / p_values)
+}
 
-p_balance_score_dist = p_balance_score_dist +
-  theme(axis.text.x = element_text(size = 7))
+# --- Simulation Setup ---
+set.seed(42)
+n_simulations <- 10000
+n_samples <- 98
 
-p_probability_dist + p_balance_score_dist + plot_performance + plot_runtime +
-  plot_layout(guides = "collect", ncol = 4) &
-  plot_annotation(tag_levels = list(c("B", "C", "D", "E"))) &
+# Create a large pool of simulated covariates to draw from
+# A mix of continuous and categorical
+covariates_pool <- data.frame(
+  id = 1:n_samples,
+  age = rnorm(n_samples, 55, 10),
+  bmi = rnorm(n_samples, 28, 4),
+  protein_X = rnorm(n_samples, 1000, 200),
+  protein_Y = rnorm(n_samples, 800, 150),
+  cholesterol = rnorm(n_samples, 200, 40),
+  sex = factor(sample(c("M", "F"), n_samples, replace = TRUE)),
+  site = factor(sample(c("Site A", "Site B", "Site C"), n_samples, replace = TRUE)),
+  treatment = factor(sample(c("Treated", "Placebo"), n_samples, replace = TRUE))
+)
+
+# Define batch structure
+batch_sizes <- c(rep(13, 7), 7)
+batch_ids <- rep(1:8, times = batch_sizes)
+
+# --- Run the Multi-faceted Simulation ---
+# Define the number of covariates for each simulation scenario
+n_cov_scenarios <- c(1, 2, 4, 8)
+results_list <- list()
+
+# Loop through each scenario (1, 3, and 6 covariates)
+for (n_cov in n_cov_scenarios) {
+  
+  balance_scores <- numeric(n_simulations)
+  # CORRECTED: Use drop=FALSE to ensure we always get a data frame
+  current_covariates <- covariates_pool[, 2:(n_cov + 1), drop = FALSE]
+  
+  # Print a message to the console instead of using a title in the progress bar
+  message(paste("Simulating for", n_cov, "covariate(s)..."))
+  pb <- txtProgressBar(min = 0, max = n_simulations, style = 3)
+  
+  for (i in 1:n_simulations) {
+    # CORRECTED: Shuffle the batch assignments while maintaining the same length
+    # batch_ids already has length n_samples (98), we just need to shuffle it
+    random_allocation <- factor(sample(batch_ids))
+    p_values <- numeric(n_cov)
+    
+    # Calculate p-value for each covariate
+    for (j in 1:n_cov) {
+      # CORRECTED: Access the full column vector properly
+      covariate_values <- current_covariates[, j]
+      
+      # Debug: check lengths (remove this after testing)
+      if(length(covariate_values) != length(random_allocation)) {
+        stop(paste("Length mismatch: covariate has", length(covariate_values), 
+                   "elements, allocation has", length(random_allocation), "elements"))
+      }
+      
+      if (is.numeric(covariate_values)) {
+        # Both vectors now have the same length
+        p_values[j] <- kruskal.test(covariate_values, random_allocation)$p.value
+      } else {
+        # Ensure at least 2 levels are present in the sample for fisher.test
+        if(length(unique(covariate_values)) > 1 && length(unique(random_allocation)) > 1) {
+          # Use contingency table approach for categorical variables
+          contingency_table <- table(covariate_values, random_allocation)
+          # Check if table has valid dimensions for fisher test
+          if(min(dim(contingency_table)) > 1) {
+            p_values[j] <- fisher.test(contingency_table, simulate.p.value = TRUE)$p.value
+          } else {
+            p_values[j] <- 1.0
+          }
+        } else {
+          p_values[j] <- 1.0 # If only one level, it's perfectly balanced by default
+        }
+      }
+    }
+    
+    balance_scores[i] <- harmonic_mean_p(p_values)
+    
+    # Update progress bar
+    setTxtProgressBar(pb, i)
+  }
+  
+  results_list[[as.character(n_cov)]] <- data.frame(
+    balance_score = balance_scores,
+    num_covariates = factor(paste(n_cov, "Covariate(s)"))
+  )
+  close(pb)
+}
+
+# Combine all results into a single dataframe
+final_results_df <- do.call(rbind, results_list) 
+
+# --- Generate the Faceted Plot ---
+sparsity_plot <- final_results_df %>%
+  dplyr:: filter(str_detect(num_covariates, "1 ") | 
+                 str_detect(num_covariates, "2 ") |
+                 str_detect(num_covariates, "4 ")) %>%
+ggplot(aes(x = balance_score)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 50, boundary = 0) +
+  facet_wrap(~ num_covariates, nrow = 1, scales = "fixed") +
+  labs(
+    x = "Balance Score",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 7) +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 10, face = "bold")
+  )
+
+# Display the plot
+print(sparsity_plot)
+```
+
+
+## summary plot
+```{r}
+# --- 1. Calculate the Summary Statistics ---
+summary_stats <- final_results_df %>%
+  group_by(num_covariates) %>%
+  summarize(
+    Median_Score = median(balance_score),
+    P95_Score = quantile(balance_score, 0.95)
+  )
+
+print(summary_stats)
+
+# --- 2. Create the Summary Plot ---
+
+# Reshape the data from wide to long format for easier plotting in ggplot
+summary_long <- summary_stats %>%
+  pivot_longer(
+    cols = c(Median_Score, P95_Score),
+    names_to = "Metric",
+    values_to = "Score"
+  ) %>%
+  mutate(
+    # Clean up the metric names for the legend
+    Metric = gsub("_Score", "", Metric)
+  )
+
+# Plot the decline
+summary_plot <- ggplot(summary_long, aes(x = num_covariates, y = Score, group = Metric, color = Metric)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1, aes(shape = Metric)) +
+  # Add text labels to show the exact values
+  geom_text(aes(label = sprintf("%.2f", Score)), vjust = -1.5, size = 2, show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 1.0), breaks = seq(0, 1, 0.2)) +
+  scale_color_manual(values = c("Median" = "#f39c12", "P95" = "#3498db")) +
+  scale_shape_manual(values = c("Median" = 16, "P95" = 17)) +
+  labs(
+    x = "Number of Covariates",
+    y = "Balance Score",
+    color = "Metric",
+    shape = "Metric"
+  ) +
+  theme_minimal(base_size = 7) +
+  theme(legend.position = "bottom",
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"))
+
+# Display the plot
+print(summary_plot)
+
+#ggsave("../results/plots/summary_of_sparsity.pdf", summary_plot, width = 70, height = 70, units = "mm", bg = "transparent")
+```
+
+
+## patchwork
+```{r}
+(sparsity_plot + summary_plot) +
+  plot_layout(guides = "collect", ncol = 2, widths = c(0.6, 0.4)) &
+  plot_annotation(tag_levels = list(c("A", "B"))) &
   theme(legend.position = "bottom")
 
-ggsave("../results/plots/single_patchwork.pdf", width = 183, height = 70, units = "mm")
+ggsave("../results/plots/sparsity_patchwork.pdf", width = 183, height = 70, units = "mm", bg = "transparent")
+```
+
+
+
+# number of possible layouts
+```{r}
+# --- Prerequisites ---
+library(ggplot2)
+library(dplyr)
+
+# --- Helper Functions ---
+
+# 1. log-sum-exp for stable summation of log-values
+log_sum_exp <- function(log_x) {
+  if (length(log_x) == 0) return(-Inf)
+  if (any(is.na(log_x))) return(NA)
+  max_log_x <- max(log_x[is.finite(log_x)])
+  if (length(max_log_x) == 0 || max_log_x == -Inf) return(-Inf)
+  max_log_x + log(sum(exp(log_x - max_log_x)))
+}
+
+# 2. Calculate log of multinomial coefficient for partitioning n samples
+# into groups of specified sizes
+log_multinomial_partitions <- function(n_samples, group_sizes) {
+  # Check if group sizes sum to n_samples
+  if (sum(group_sizes) != n_samples) return(-Inf)
+  
+  # Multinomial coefficient: n! / (n1! * n2! * ... * nk!)
+  log_result <- lfactorial(n_samples) - sum(lfactorial(group_sizes))
+  
+  # Account for identical group sizes (groups are unordered)
+  size_counts <- table(group_sizes)
+  log_result <- log_result - sum(lfactorial(size_counts))
+  
+  return(log_result)
+}
+
+# 3. Generate all integer partitions of n into at most k parts, each ≤ max_val
+# Uses dynamic programming approach
+generate_partitions <- function(n, max_parts = NULL, max_val = NULL) {
+  if (is.null(max_parts)) max_parts <- n
+  if (is.null(max_val)) max_val <- n
+  
+  # Use dynamic programming table
+  # dp[i][j][m] = partitions of i into at most j parts, each ≤ m
+  partitions <- list()
+  
+  # Helper function using recursion with proper bounds
+  get_partitions_recursive <- function(remaining, parts_left, min_val, max_val, current_partition) {
+    if (remaining == 0) {
+      if (length(current_partition) > 0) {
+        return(list(current_partition))
+      } else {
+        return(list())
+      }
+    }
+    
+    if (parts_left == 0 || remaining < 0) {
+      return(list())
+    }
+    
+    result <- list()
+    
+    # Try all possible values for the next part
+    upper_bound <- min(remaining, max_val)
+    lower_bound <- max(min_val, ceiling(remaining / parts_left))
+    
+    if (lower_bound <= upper_bound) {
+      for (val in lower_bound:upper_bound) {
+        sub_partitions <- get_partitions_recursive(
+          remaining - val, 
+          parts_left - 1, 
+          1, # Allow smaller values in subsequent parts
+          val, # Maintain non-increasing order
+          c(current_partition, val)
+        )
+        result <- c(result, sub_partitions)
+      }
+    }
+    
+    return(result)
+  }
+  
+  # Generate partitions for different number of parts
+  all_partitions <- list()
+  for (k in 1:min(max_parts, n)) {
+    k_partitions <- get_partitions_recursive(n, k, 1, max_val, c())
+    all_partitions <- c(all_partitions, k_partitions)
+  }
+  
+  return(all_partitions)
+}
+
+# 4. Main function to calculate total log partitions
+calculate_total_log_partitions <- function(n_samples, max_batch_size) {
+  if (n_samples <= 0) return(-Inf)
+  if (max_batch_size <= 0) return(-Inf)
+  
+  # Calculate the MINIMUM number of batches required
+  min_batches <- ceiling(n_samples / max_batch_size)
+  
+  # Generate only partitions that use exactly min_batches parts
+  valid_partitions <- generate_partitions(
+    n = n_samples, 
+    max_parts = min_batches, 
+    max_val = max_batch_size
+  )
+  
+  # Filter to keep only partitions with exactly min_batches parts
+  valid_partitions <- valid_partitions[sapply(valid_partitions, length) == min_batches]
+  
+  if (length(valid_partitions) == 0) return(-Inf)
+  
+  # Calculate log-probability for each partition
+  log_partition_counts <- sapply(valid_partitions, function(partition) {
+    log_multinomial_partitions(n_samples, partition)
+  })
+  
+  # Sum using log-sum-exp for numerical stability
+  return(log_sum_exp(log_partition_counts))
+}
+
+# 5. Alternative simpler approach for verification (Bell numbers with constraints)
+# This uses a different mathematical approach for cross-validation
+calculate_constrained_bell_log <- function(n_samples, max_batch_size) {
+  # This is a simplified approximation - the exact calculation is more complex
+  # For small examples, we can enumerate directly
+  if (n_samples <= 10) {
+    return(calculate_total_log_partitions(n_samples, max_batch_size))
+  }
+  
+  # For larger n, this becomes computationally intensive
+  # Using the primary method
+  return(calculate_total_log_partitions(n_samples, max_batch_size))
+}
+
+# --- Test with small examples for verification ---
+cat("Testing with small examples:\n")
+
+cat("n=4, max_batch=2 (needs exactly 2 batches):\n")
+test_result <- calculate_total_log_partitions(4, 2)
+cat("Log count:", test_result, "Actual count:", exp(test_result), "\n")
+cat("Expected: {2,2} partition only -> 4!/(2!*2!) / 2! = 6/2 = 3 ways\n\n")
+
+cat("n=5, max_batch=3 (needs exactly 2 batches):\n")
+test_result2 <- calculate_total_log_partitions(5, 3)
+cat("Log count:", test_result2, "Actual count:", exp(test_result2), "\n")
+cat("Expected: {3,2} partition only -> 5!/(3!*2!) = 120/12 = 10 ways\n\n")
+
+cat("n=7, max_batch=3 (needs exactly 3 batches):\n")
+test_result3 <- calculate_total_log_partitions(7, 3)
+cat("Log count:", test_result3, "Actual count:", exp(test_result3), "\n")
+cat("Expected:\n 
+    {3,2,2} partition -> 7!/(3!*2!*2!) / 2! = 5040/48 = 105 ways\n 
+    {3,3,1} partition -> 7! / (3!*3!*1!) / 2! = 70\n
+    Total expected = 175 ways\n")
+
+# --- Create data for the plot ---
+fixed_batch_size <- 13
+# Use fewer points for computational efficiency
+sample_numbers <- seq(from = 14, to = 60, by = 1)
+
+cat("Calculating partition counts...\n")
+log_partitions <- numeric(length(sample_numbers))
+
+for (i in seq_along(sample_numbers)) {
+  n <- sample_numbers[i]
+  cat("Calculating for n =", n, "\n")
+  log_partitions[i] <- calculate_total_log_partitions(n, fixed_batch_size)
+}
+
+# Convert to log10 for plotting
+log10_partitions <- log_partitions / log(10)
+plot_data <- data.frame(
+  n_samples = sample_numbers, 
+  log10_partitions = log10_partitions
+)
+
+# --- Generate the Plot ---
+# Convert back to actual counts for plotting with log scale
+actual_partitions <- exp(log_partitions)
+
+plot_data_actual <- data.frame(
+  n_samples = sample_numbers, 
+  partitions = actual_partitions
+)
+
+line_positions <- seq(from = 14, to = max(plot_data_actual$n_samples), by = 13)
+
+vastness_plot <- ggplot(plot_data_actual, aes(x = n_samples, y = partitions)) +
+  geom_vline(
+    xintercept = line_positions,
+    color = "lightgrey",
+    linetype = "dashed",
+    linewidth = 0.7
+  ) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1, alpha = 0.7) +
+  theme_minimal(base_size = 7) +
+  labs(
+    x = "Number of Samples",
+    y = "Number of Possible Allocations",
+  ) +
+  scale_y_log10(
+    labels = scales::label_scientific(),
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    minor_breaks = scales::trans_breaks("log10", function(x) 10^x, n = 10)
+  ) +
+  
+  theme(
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+print(vastness_plot)
+
+# Display some example values
+cat("\nExample results:\n")
+for (i in c(1, length(sample_numbers))) {
+  n <- sample_numbers[i]
+  actual_count <- actual_partitions[i]
+  cat(sprintf("n=%d: %.2e partitions\n", n, actual_count))
+}
+
+ggsave("../results/plots/number_possible_layouts.pdf", vastness_plot, width = 90, height = 50, units = "mm", bg = "transparent")
 ```
 
 
@@ -226,14 +558,4 @@ ggsave("../results/plots/optimisation_for_schematic.pdf", width = 50, height = 5
 ```{r}
 sessionInfo()
 ```
-
-
-
-
-
-
-
-
-
-
 
