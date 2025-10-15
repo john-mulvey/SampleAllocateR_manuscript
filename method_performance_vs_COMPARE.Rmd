@@ -1,0 +1,209 @@
+---
+title: "R Notebook"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(janitor)
+#library(SampleAllocateR)
+```
+
+In order to give a real world example of performance, we will compare the SampleAllocateR method to the allocations of perfusate samples to TMTexperiments from the COPE COMPARE perfusate proteomics proejct [@mulvey_2023].
+
+Here the covariates used were
+- treatment (+O2 = 1, -O2 = 0)
+- acute rejections (TRUE, FALSE)
+- eGFR at 12 months (continuous)
+- functional DGF (TRUE, FALSE)
+- perfusion duration (continuous)
+- kidney pairs within each timpoint (i.e. pairs are kidneys are blocked so that e.g. the P3 samples always appear within the same batch)
+
+```{r}
+sample_meta = read.csv("../data/COPE_COMPARE_perfusate_TMTexperiment_allocation.csv") %>%
+  clean_names() %>%
+  dplyr::select(
+    sample_id = block,
+    kidney_id = trial_id_database,
+    treatment = treat,
+    acute_rejection,
+    egfr_12m = egfrmdr_12m,
+    functional_dgf = func_dgf,
+    perfusion_duration,
+    batch_allocation = tm_tset
+  ) %>%
+  filter(!is.na(kidney_id)) %>%
+  mutate(batch_allocation = as.factor(batch_allocation),
+         kidney_id = as.factor(kidney_id),
+         treatment = as.factor(recode(treatment, "1" = "HMP+O2", "0" = "HMP-O2")),
+         acute_rejection = as.factor(acute_rejection),
+         functional_dgf = as.factor(recode(functional_dgf, "1" = TRUE, "0" = FALSE)),
+         donor_id = as.factor(str_extract(sample_id, "^[^_]+")),
+         timepoint = as.factor(str_extract(sample_id, "(?<=_).*")),
+         sample_id = as.factor(paste0(kidney_id, "_", timepoint)),
+         donor_id = as.factor(str_remove(kidney_id, "[A-Za-z]$")),
+         donor_timepoint = factor(paste(donor_id, timepoint, sep = "_"))
+         ) %>%
+  droplevels()
+```
+
+
+# summary of sample meta
+```{r}
+# number of samples per kidney
+sample_meta %>%
+  group_by(kidney_id) %>%
+  summarise(n = n()) %>%
+  group_by(n) %>%
+  count()
+
+# number of donors
+sample_meta$donor_id %>%
+  levels() %>%
+  length()
+
+# number of samples per donor
+sample_meta %>% 
+  group_by(donor_id) %>% 
+  count() %>% 
+  group_by(n) %>% 
+  count()
+```
+
+
+```{r}
+# clean perfusion duration outlier
+hist(sample_meta$perfusion_duration)
+
+sample_meta = sample_meta %>%
+  mutate(perfusion_duration = ifelse(perfusion_duration > 1000, NA, perfusion_duration))
+```
+
+
+# balance of previous layout
+```{r}
+# select only relevant covariates
+sample_meta_min = dplyr::select(sample_meta, sample_id, treatment, acute_rejection, egfr_12m, functional_dgf, perfusion_duration, batch_allocation)
+
+data = list(layout = sample_meta_min,
+            results = test_covariates(sample_meta_min))
+
+check_significance(data)
+omixer_layout_balance = calculate_balance_score(data$results$p_value)
+print(omixer_layout_balance)
+
+plot_layout(data,
+            id_column = "sample_id",
+            covariates = c("treatment", "acute_rejection", "egfr_12m", "functional_dgf", "perfusion_duration"))
+```
+
+
+# allocate optimal layout
+```{r}
+sample_meta_min2 = dplyr::select(sample_meta, sample_id, treatment, acute_rejection, egfr_12m, functional_dgf, perfusion_duration, donor_timepoint)
+
+optimal_layout = allocate_samples(data = sample_meta_min2,
+                                covariates = c("treatment", "acute_rejection", "egfr_12m", "functional_dgf", "perfusion_duration"),
+                                blocking_variable = "donor_timepoint",
+                                batch_size = 10,
+                                temperature = 1,
+                                cooling_rate = 0.975,
+                                iterations = 1000,
+                                plot = TRUE,
+                                balance_metric = "harmonic_mean")
+
+```
+
+
+```{r}
+optimal_layout_balance = calculate_balance_score(optimal_layout$results$p_value)
+print(optimal_layout_balance)
+
+optimal_layout_plots = plot_layout(optimal_layout,
+            id_column = "sample_id",
+            covariates = c("treatment", "acute_rejection", "egfr_12m", "functional_dgf", "perfusion_duration"))
+
+optimal_layout_plots
+```
+
+
+## formated for paper
+### continuous variables
+```{r}
+# recode covariate levels for better facet labels
+optimal_layout_plots[["continuous"]]$data$covariate <- recode(optimal_layout_plots[["continuous"]]$data$covariate,
+                             "egfr_12m" = "eGFR (12 months)",
+                             "perfusion_duration" = "Perfusion Duration (hours)")
+
+# plot
+optimal_layout_plots[["continuous"]] +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+       plot.title = element_blank()) +
+  labs(x = "Allocated Batch",
+       y = "Value")
+
+ggsave("../results/plots/compare_continuous_vars_for_paper.pdf", width = 113, height = 70, units = "mm", bg = "transparent")
+```
+
+
+### categorical variables
+```{r}
+# recode covariate levels for better facet labels
+optimal_layout_plots[["categorical"]]$data$covariate <- recode(optimal_layout_plots[["categorical"]]$data$covariate,
+                             "acute_rejection" = "Acute Rejection",
+                             "functional_dgf" = "Delayed Graft Function",
+                             "treatment" = "Treatment")
+
+# plot
+optimal_layout_plots[["categorical"]] +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6),
+        plot.title = element_blank()) +
+  labs(x = "Allocated Batch",
+       y = "Count")
+
+ggsave("../results/plots/compare_categorical_vars_for_paper.pdf", width = 183, height = 70, units = "mm", bg = "transparent")
+```
+
+
+
+
+# compare method performance
+```{r}
+compare_data = data.frame(
+  method = c("Omixer", "SampleAllocateR"),
+  balance_score = c(
+    omixer_layout_balance,  # Omixer
+    optimal_layout_balance   # SampleAllocateR
+  ))
+
+compare_data %>%
+  ggplot(aes(x = method, y = balance_score, fill = method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("../results/plots/performance_vs_compare_for_paper.pdf", width = 70, height = 70, units = "mm", bg = "transparent")
+```
+
+
+# sessionInfo
+```{r}
+sessionInfo()
+```
+
+
