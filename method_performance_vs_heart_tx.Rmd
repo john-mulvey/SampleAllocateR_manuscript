@@ -1,0 +1,204 @@
+---
+title: "R Notebook"
+author: "John Mulvey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: flatly
+    highlight: tango
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(janitor)
+#library(SampleAllocateR)
+```
+
+In order to give a real world example of performance, we will compare the SampleAllocateR method to the allocations of samples to 3 batches (maximum size of 96 for a (96WP format) in the heart transplant project of MS and JA.
+
+Here the covariates used were
+- CAV (= chronic allograft vasculopathy) future development
+- diabetes mellitus diagnosis
+- timeopint of sample collection - 5, here labelled 1-5
+
+```{r}
+sample_meta = read.csv("../data/meta_experimental_layout_htx_cav.csv") %>%
+  clean_names() %>%
+  transmute(sample_id = as.character(x),
+            future_cav = as.factor(ifelse(cav == 1, TRUE, FALSE)),
+            diabetes = as.factor(ifelse(dm == 1, TRUE, FALSE)),
+            patient_id = as.factor(patient),
+            batch_allocation = as.factor(plate),
+            timepoint = as.factor(t))
+```
+
+
+```{r}
+# we currently require all blocks to be of equal size - so here we add back in 6 "lost" samples
+patients_with_missing_samples = sample_meta %>%
+  group_by(patient_id) %>%
+  summarise(n = n()) %>%
+  filter(n < 5) %>%
+  pull(patient_id)
+
+missing_samples = sample_meta %>%
+  filter(patient_id %in% patients_with_missing_samples) %>%
+  group_by(patient_id) %>%
+  summarise(missing_sample = setdiff(1:5, timepoint)) %>%
+  unnest(missing_sample) %>%
+  mutate(sample_id = paste0(patient_id, "_", missing_sample),
+         future_cav = NA,
+         diabetes = NA,
+         batch_allocation = NA,
+         timepoint = as.factor(missing_sample)) %>%
+  dplyr::select(-missing_sample)
+  
+# bind lost samples to sample_meta
+sample_meta = sample_meta %>%
+  bind_rows(missing_samples)
+
+# check
+sample_meta %>%
+  group_by(patient_id) %>%
+  summarise(n = n()) %>%
+  group_by(n) %>%
+  summarise(n = n())
+```
+
+
+# balance of previous layout
+```{r}
+# must continuous vars be present???
+sample_meta_without_missing = sample_meta %>%
+              filter(!is.na(batch_allocation)) %>%
+              dplyr::select(sample_id, batch_allocation, future_cav, diabetes, timepoint)
+
+data = list(layout = sample_meta_without_missing,
+            results = test_covariates(sample_meta_without_missing))
+
+manual_layout_balance = calculate_balance_score(data$results$p_value)
+print(manual_layout_balance)
+
+#data = list(layout = sample_meta_without_missing)
+plot_layout(data,
+            id_column = "sample_id",
+            covariates = c("future_cav", "diabetes", "timepoint"))
+```
+
+
+# allocate optimal layout
+```{r}
+optimal_layout = allocate_samples(sample_meta,
+                                  batch_size = 96,
+                                  id_column = "sample_id",
+                                  covariates = c("future_cav", "diabetes", "timepoint"),
+                                  blocking_variable = "patient_id",
+                                  method = "simulated_annealing",
+                                  iterations = 1000)
+```
+
+
+```{r}
+optimal_layout_balance = calculate_balance_score(optimal_layout$results$p_value)
+print(optimal_layout_balance)
+
+plot_layout(optimal_layout,
+            id_column = "sample_id",
+            covariates = c("future_cav", "diabetes", "timepoint"))
+```
+
+
+## plot optimal layout for poster
+```{r}
+layout = optimal_layout[["layout"]] %>%
+  mutate(
+    timepoint = factor(case_when(
+      timepoint == "1" ~ "preservation",
+      timepoint == "2" ~ "1_month",
+      timepoint == "3" ~ "3_months",
+      timepoint == "4" ~ "6_months",
+      timepoint == "5" ~ "12_months"
+    ), levels = c("preservation", "1_month", "3_months", "6_months", "12_months"))
+  )
+
+# drop levels after recoding factor
+optimal_layout[["layout"]]$timepoint <- droplevels(optimal_layout[["layout"]]$timepoint)
+
+id_column = "sample_id"
+covariates = c("future_cav", "diabetes", "timepoint")
+
+layout = layout %>%
+  dplyr::select({{id_column}}, batch_allocation, all_of(covariates))
+
+continuous_vars <- layout %>% dplyr::select(where(is.numeric)) %>% names()
+categorical_vars <- layout %>% dplyr::select(where(is.factor)) %>% names()
+
+# categorical covariates
+facet_labels <- c(
+  future_cav = "Future CAV",
+  diabetes = "Recipient Diabetes",
+  timepoint = "Biopsy Timepoint")
+
+if(length(categorical_vars) > 0) {
+  categorical_plot = layout %>%
+    dplyr::filter(!grepl("padding", sample_id)) %>%
+    dplyr::select(where(is.factor) | {{id_column}}, batch_allocation) %>%
+    tidyr::pivot_longer(cols = !c({{id_column}}, batch_allocation), names_to = "covariate", values_to = "value") %>%
+    droplevels() %>%
+    dplyr::group_by(covariate, value, batch_allocation) %>%
+    dplyr::summarise(n = n()) %>%
+    ggplot2::ggplot(aes(x = batch_allocation, y = n, fill = value)) +
+    geom_col()  +
+    facet_wrap(~ covariate, scales = "free_y", labeller = as_labeller(facet_labels)) +
+    theme_minimal() +
+    labs(x = "Allocated Batch", y = "Count") +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 6),
+    legend.title = element_blank(),
+    legend.key.size = unit(0.3, "cm")
+  )  +
+  guides(fill = guide_legend(
+    direction = "horizontal",
+    nrow = 1
+  ))
+  
+  print(categorical_plot)
+}
+
+#ggsave("~/Downloads/heart_tx_optimal_layout_for_poster.pdf", categorical_plot,  width = 9, height = 5)
+ggsave("../results/plots/heart_tx_optimal_layout_for_paper.pdf", categorical_plot,  width = 113, height = 70, units = "mm")
+```
+
+
+# compare method performance
+```{r}
+heart_tx_data = data.frame(
+  method = c("manual", "SampleAllocateR"),
+  balance_score = c(
+   manual_layout_balance,  # manual
+   optimal_layout_balance   # SampleAllocateR
+  ))
+
+heart_tx_data %>%
+  ggplot(aes(x = method, y = balance_score, fill = method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+#ggsave("~/Downloads/performance_vs_heart_tx.pdf", width = 7, height = 5, bg = "transparent")
+ggsave("../results/plots/performance_vs_heart_tx_for_paper.pdf", width = 70, height = 70, units = "mm", bg = "transparent")
+```
+
+
+# sessionInfo
+```{r}
+sessionInfo()
+```
+
